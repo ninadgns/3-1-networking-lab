@@ -15,7 +15,7 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Vector;
 
-public class SimpleHttpServer {
+public class SimpleHttpServerOld {
     public static Vector<String> fileNames = new Vector<>();
 
     static void populateFileNames() throws IOException {
