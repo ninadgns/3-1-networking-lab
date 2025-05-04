@@ -1,0 +1,78 @@
+@startuml
+!define RECTANGLE class
+
+title Chat Application Communication Flow
+
+skinparam backgroundColor white
+skinparam handwritten false
+skinparam defaultFontName Arial
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 5
+
+participant "Server" as S
+participant "ClientHandlerThread" as CHT
+participant "Client" as C
+
+note over S: Initialize ServerSocket on port 1812
+note over S: Start client connection thread
+note over S: Start server console thread
+
+group Client Connection Process
+    C -> S: Connect to server
+    activate S
+    S -> CHT: Create new ClientHandlerThread
+    activate CHT
+    C -> CHT: Send username
+    CHT -> CHT: Store username
+    CHT -> S: Add to clientThreads vector
+    deactivate S
+end
+
+group Server-Client Communication
+    alt Server Initiates Chat
+        S -> S: List available clients
+        S -> S: Select client to chat with
+        S -> CHT: Send message to selected client
+        CHT -> C: Forward message to client
+        C -> C: Display message with color
+    else Client Sends Message
+        C -> CHT: Send message
+        activate CHT
+        CHT -> CHT: Store in message history
+        CHT -> S: Message available for server to view
+        deactivate CHT
+    end
+end
+
+participant "Client Acceptance Thread" as SAT
+participant "Console Interface Thread" as SIT
+participant "Input Thread" as CIT
+participant "Output Thread" as COT
+
+note over SAT, SIT: Server Threads
+note over CIT, COT: Client Threads
+
+group Multi-threaded Operations
+    SAT -> SAT: Wait for client connections
+    SIT -> SIT: Handle server admin console
+    
+    CIT -> CIT: Read user input
+    CIT -> CHT: Send message to server
+    
+    CHT -> COT: Send server message to client
+    COT -> COT: Display received message
+end
+
+group Termination
+    alt Client Quits
+        C -> CHT: Send "quit" message
+        CHT -> CHT: Set running to false
+        CHT -> CHT: Close connection
+    else Server Exits
+        S -> S: Exit application
+        S -> CHT: Terminate all client handlers
+        CHT -> C: Close connection
+    end
+end
+
+@enduml
