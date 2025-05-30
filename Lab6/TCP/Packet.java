@@ -1,27 +1,24 @@
 import java.io.*;
 
-public class TCPPacket {
+public class Packet {
     private byte[] packet;
 
-    // TCP header minimum size is 20 bytes
     private static final int MIN_HEADER_SIZE = 20;
 
-    // Default constructor - creates packet with minimum header size
-    public TCPPacket() {
+    public Packet() {
         this.packet = new byte[MIN_HEADER_SIZE];
-        // Set default header length to 5 (20 bytes / 4 = 5 words)
+
         setHeaderLength(5);
     }
 
-    public TCPPacket(int size) {
+    public Packet(int size) {
         this.packet = new byte[size];
     }
 
-    public TCPPacket(byte[] packet) {
+    public Packet(byte[] packet) {
         this.packet = packet;
     }
 
-    // Source Port (bytes 0-1)
     public int getSourcePort() {
         return ((packet[0] & 0xFF) << 8) | (packet[1] & 0xFF);
     }
@@ -31,7 +28,6 @@ public class TCPPacket {
         packet[1] = (byte) (port & 0xFF);
     }
 
-    // Destination Port (bytes 2-3)
     public int getDestinationPort() {
         return ((packet[2] & 0xFF) << 8) | (packet[3] & 0xFF);
     }
@@ -41,7 +37,6 @@ public class TCPPacket {
         packet[3] = (byte) (port & 0xFF);
     }
 
-    // Sequence Number (bytes 4-7)
     public long getSequenceNumber() {
         return ((long) (packet[4] & 0xFF) << 24) |
                 ((long) (packet[5] & 0xFF) << 16) |
@@ -56,7 +51,6 @@ public class TCPPacket {
         packet[7] = (byte) (seqNum & 0xFF);
     }
 
-    // Acknowledgment Number (bytes 8-11)
     public long getAckNumber() {
         return ((long) (packet[8] & 0xFF) << 24) |
                 ((long) (packet[9] & 0xFF) << 16) |
@@ -71,7 +65,6 @@ public class TCPPacket {
         packet[11] = (byte) (ackNum & 0xFF);
     }
 
-    // Header Length (upper 4 bits of byte 12)
     public int getHeaderLength() {
         return (packet[12] & 0xF0) >> 4;
     }
@@ -80,7 +73,6 @@ public class TCPPacket {
         packet[12] = (byte) ((packet[12] & 0x0F) | ((length & 0x0F) << 4));
     }
 
-    // TCP Flags (lower 6 bits of byte 13)
     public boolean getUrgFlag() {
         return (packet[13] & 0x20) != 0;
     }
@@ -153,7 +145,6 @@ public class TCPPacket {
         }
     }
 
-    // Window Size (bytes 14-15)
     public int getWindowSize() {
         return ((packet[14] & 0xFF) << 8) | (packet[15] & 0xFF);
     }
@@ -163,7 +154,6 @@ public class TCPPacket {
         packet[15] = (byte) (windowSize & 0xFF);
     }
 
-    // Checksum (bytes 16-17)
     public int getChecksum() {
         return ((packet[16] & 0xFF) << 8) | (packet[17] & 0xFF);
     }
@@ -173,7 +163,6 @@ public class TCPPacket {
         packet[17] = (byte) (checksum & 0xFF);
     }
 
-    // Urgent Pointer (bytes 18-19)
     public int getUrgentPointer() {
         return ((packet[18] & 0xFF) << 8) | (packet[19] & 0xFF);
     }
@@ -183,9 +172,8 @@ public class TCPPacket {
         packet[19] = (byte) (urgentPointer & 0xFF);
     }
 
-    // Get payload data
     public byte[] getPayload() {
-        int headerSize = getHeaderLength() * 4; // Header length is in 32-bit words
+        int headerSize = getHeaderLength() * 4;
         if (headerSize >= packet.length) {
             return new byte[0];
         }
@@ -194,11 +182,10 @@ public class TCPPacket {
         return payload;
     }
 
-    // Set payload data
     public void setPayload(byte[] payload) {
         int headerSize = getHeaderLength() * 4;
         if (headerSize + payload.length > packet.length) {
-            // Resize packet array if needed
+
             byte[] newPacket = new byte[headerSize + payload.length];
             System.arraycopy(packet, 0, newPacket, 0, headerSize);
             packet = newPacket;
@@ -206,22 +193,18 @@ public class TCPPacket {
         System.arraycopy(payload, 0, packet, headerSize, payload.length);
     }
 
-    // Get raw packet
     public byte[] getPacket() {
         return packet;
     }
 
-    // Set raw packet
     public void setPacket(byte[] packet) {
         this.packet = packet;
     }
 
-    // Get packet length
     public int getPacketLength() {
         return packet.length;
     }
 
-    // Send packet through DataOutputStream
     public void sendPacket(DataOutputStream out) throws IOException {
         byte[] packetData = this.getPacket();
         out.writeInt(packetData.length);
@@ -229,15 +212,13 @@ public class TCPPacket {
         out.flush();
     }
 
-    // Receive packet from DataInputStream
-    public static TCPPacket receivePacket(DataInputStream in) throws IOException {
+    public static Packet receivePacket(DataInputStream in) throws IOException {
         int length = in.readInt();
         byte[] packetData = new byte[length];
         in.readFully(packetData);
-        return new TCPPacket(packetData);
+        return new Packet(packetData);
     }
 
-    // Print packet information
     public void printPacketInfo() {
         System.out.println("  Source Port: " + getSourcePort());
         System.out.println("  Destination Port: " + getDestinationPort());
@@ -245,8 +226,8 @@ public class TCPPacket {
         System.out.println("  ACK Number: " + getAckNumber());
         System.out.println("  Window Size: " + getWindowSize());
         System.out.println("  Flags: SYN=" + getSynFlag() +
-                          " ACK=" + getAckFlag() +
-                          " FIN=" + getFinFlag());
+                " ACK=" + getAckFlag() +
+                " FIN=" + getFinFlag());
         System.out.println();
     }
 
