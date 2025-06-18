@@ -229,6 +229,7 @@ public class Packet {
                 " ACK=" + getAckFlag() +
                 " FIN=" + getFinFlag());
         System.out.println();
+        System.out.flush();
     }
 
 }

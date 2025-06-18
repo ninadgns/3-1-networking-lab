@@ -1,11 +1,20 @@
-import java.io.*;
-import java.net.*;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.*;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Random;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class Client {
+
+    private ConnectionManager connectionManager = new ConnectionManager();
     private Random random = new Random();
     private long sequenceNumber;
     private long ackNumber;
@@ -16,7 +25,7 @@ public class Client {
     private long baseSequenceNumber;
     private volatile boolean ackReceiverRunning = true;
 
-    private static final double PACKET_LOSS_RATE = 0.15;
+    private static final double PACKET_LOSS_RATE = 0.5;
     private int totalPacketsSent = 0;
     private int packetsDropped = 0;
 
@@ -29,6 +38,21 @@ public class Client {
     private static final double ALPHA = 0.125;
     private static final double BETA = 0.25;
 
+    // Congestion Control Variables
+    private int congestionWindow = Constants.MAX_SEGMENT_SIZE; // Start with 1 MSS
+    private int slowStartThreshold = 65535; // Initial high value
+
+    private enum CongestionState {
+        SLOW_START, CONGESTION_AVOIDANCE, FAST_RECOVERY
+    }
+
+    private CongestionState congestionState = CongestionState.SLOW_START;
+    // private int fastRecoveryInflight = 0;
+    private long fastRecoverySequence = -1;
+    private int packetsSinceLastIncrease = 0;
+
+    private DataOutputStream currentOutputStream;
+
     public static void main(String[] args) {
         System.setOut(new PrintStream(System.out, true));
         Client client = new Client();
@@ -40,28 +64,34 @@ public class Client {
                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                 DataInputStream in = new DataInputStream(socket.getInputStream())) {
 
-            this.currentOutputStream = out;
-
-            System.out.println("Connected to server at " + Constants.SERVER_HOST + ":" + Constants.SERVER_PORT);
-
+            currentOutputStream = out;
             performHandshake(in, out);
 
-            Thread ackReceiver = new Thread(() -> handleAcks(in));
-            ackReceiver.setDaemon(true);
-            ackReceiver.start();
+            // Start ACK receiver thread BEFORE sending any data
+            Thread ackThread = new Thread(() -> handleAcks(in));
+            ackThread.setDaemon(true);
+            ackThread.start();
+
+            // Give ACK thread time to start
+            Thread.sleep(200);
+
+            // Verify thread is running
+            if (!ackThread.isAlive()) {
+                throw new RuntimeException("ACK receiver thread failed to start");
+            }
 
             sendFileWithSlidingWindow(out);
-
             waitForAllAcks();
-
-            ackReceiverRunning = false;
-
             closeConnection(in, out);
 
         } catch (IOException e) {
-            System.err.println("Client error: " + e.getMessage());
+            System.err.println("[ERROR] Connection error: " + e.getMessage());
             e.printStackTrace();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("[ERROR] Thread interrupted: " + e.getMessage());
         } finally {
+            ackReceiverRunning = false;
             retransmissionTimer.cancel();
         }
     }
@@ -76,36 +106,37 @@ public class Client {
         synPacket.setSynFlag(true);
         synPacket.setWindowSize(Constants.CLIENT_WINDOW_SIZE);
 
-        System.out.println("Sending SYN packet with seq: " + sequenceNumber);
+        System.out.println("[HANDSHAKE] Sending SYN packet with seq: " + sequenceNumber);
         synPacket.sendPacket(out);
-        System.out.println("Sent SYN packet:");
+        System.out.println("[HANDSHAKE] SYN packet sent successfully");
         synPacket.printPacketInfo();
 
-        System.out.println("Waiting for SYN-ACK packet...");
+        System.out.println("[HANDSHAKE] Waiting for SYN-ACK packet...");
         Packet synAckPacket = Packet.receivePacket(in);
 
-        System.out.println("Received packet with flags - SYN: " + synAckPacket.getSynFlag() +
+        System.out.println("[HANDSHAKE] Received packet - SYN: " + synAckPacket.getSynFlag() +
                 ", ACK: " + synAckPacket.getAckFlag());
-        System.out.println("Expected ACK number: " + (sequenceNumber + 1) +
-                ", Received ACK number: " + synAckPacket.getAckNumber());
+        System.out.println("[HANDSHAKE] Expected ACK: " + (sequenceNumber + 1) +
+                ", Received ACK: " + synAckPacket.getAckNumber());
 
         if (!synAckPacket.getSynFlag() || !synAckPacket.getAckFlag()) {
-            System.err.println("Expected SYN-ACK packet but didn't receive one");
+            System.err.println("[ERROR] Expected SYN-ACK packet but didn't receive one");
             return;
         }
 
         if (synAckPacket.getAckNumber() != sequenceNumber + 1) {
-            System.err.println("Received incorrect ACK number in SYN-ACK");
+            System.err.println("[ERROR] Received incorrect ACK number in SYN-ACK");
             return;
         }
 
-        System.out.println("Received SYN-ACK packet:");
+        System.out.println("[HANDSHAKE] SYN-ACK packet received:");
         synAckPacket.printPacketInfo();
 
         sequenceNumber++;
         ackNumber = synAckPacket.getSequenceNumber() + 1;
         serverWindowSize = synAckPacket.getWindowSize();
         baseSequenceNumber = sequenceNumber;
+
         Packet ackPacket = new Packet();
         ackPacket.setSourcePort(Constants.CLIENT_PORT);
         ackPacket.setDestinationPort(Constants.SERVER_PORT);
@@ -115,40 +146,49 @@ public class Client {
         ackPacket.setWindowSize(Constants.CLIENT_WINDOW_SIZE);
 
         ackPacket.sendPacket(out);
-        System.out.println("Sent ACK packet:");
+        System.out.println("[HANDSHAKE] ACK packet sent:");
         ackPacket.printPacketInfo();
-        System.out.println("Connection established!");
-        System.out.println("Server window size: " + serverWindowSize);
-        System.out.println("Client window size: " + Constants.CLIENT_WINDOW_SIZE);
+
+        System.out.println("[HANDSHAKE] Connection established successfully!");
+        System.out.println("[HANDSHAKE] Server window size: " + serverWindowSize + " bytes");
+        System.out.println("[HANDSHAKE] Client window size: " + Constants.CLIENT_WINDOW_SIZE + " bytes");
     }
 
     private void sendFileWithSlidingWindow(DataOutputStream out) throws IOException {
-
         byte[] fileData;
         try {
             fileData = Files.readAllBytes(Paths.get(Constants.FILE_PATH));
-            System.out.println("File size: " + fileData.length + " bytes");
+            System.out.println("[FILE] File size: " + fileData.length + " bytes");
         } catch (IOException e) {
-            System.err.println("Error reading file: " + e.getMessage());
+            System.err.println("[ERROR] Error reading file: " + e.getMessage());
             return;
         }
+
         int totalChunks = (int) Math.ceil((double) fileData.length / Constants.MAX_SEGMENT_SIZE);
         int bytesSent = 0;
         int chunkNumber = 0;
 
-        System.out.println("Starting file transfer with sliding window protocol...");
-        System.out.println(
-                "Effective window size: " + Math.min(serverWindowSize, Constants.CLIENT_WINDOW_SIZE) + " bytes");
+        System.out.println("[TRANSFER] Starting file transfer with congestion control...");
+
+        // Make sure ACK receiver thread is fully started and ready
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        System.out.println("[TRANSFER] ACK receiver thread status: " + ackReceiverRunning);
 
         while (bytesSent < fileData.length) {
-
-            int effectiveWindowSize = Math.min(serverWindowSize, Constants.CLIENT_WINDOW_SIZE);
-
-            long windowBase = baseSequenceNumber;
-            long windowTop = windowBase + effectiveWindowSize;
+            // Calculate effective window size using congestion control
+            int effectiveWindowSize = Math.min(Math.min(serverWindowSize, Constants.CLIENT_WINDOW_SIZE),
+                    congestionWindow);
 
             boolean sentPacket = false;
+            boolean windowFull = false;
 
+            // Send packets within the congestion window
             while (getBytesInFlight() + Constants.MAX_SEGMENT_SIZE <= effectiveWindowSize &&
                     bytesSent < fileData.length) {
 
@@ -175,37 +215,52 @@ public class Client {
                 sequenceNumber += chunkSize;
                 sentPacket = true;
 
-                System.out.println("Sent chunk " + chunkNumber + "/" + totalChunks +
-                        " (seq: " + dataPacket.getSequenceNumber() + ", " + chunkSize + " bytes) - " +
-                        "Bytes in flight: " + getBytesInFlight() + "/" + effectiveWindowSize +
-                        " - Total sent: " + bytesSent + "/" + fileData.length +
-                        " - Base: " + baseSequenceNumber);
-                System.out.flush();
+                System.out.println("[TRANSFER] Chunk " + chunkNumber + "/" + totalChunks +
+                        " sent (seq: " + dataPacket.getSequenceNumber() +
+                        ", size: " + chunkSize + " bytes)" +
+                        " | CWND: " + congestionWindow + " bytes (" +
+                        (congestionWindow / Constants.MAX_SEGMENT_SIZE) + " MSS)" +
+                        " | State: " + congestionState +
+                        " | In-flight: " + getBytesInFlight() + "/" + effectiveWindowSize);
             }
 
+            // Check why we stopped sending packets
             if (sentPacket) {
-                System.out.println("Window filled. Waiting for ACKs to slide window...");
+                if (bytesSent >= fileData.length) {
+                    System.out.println("[TRANSFER] All packets sent. Waiting for ACKs...");
+                } else if (getBytesInFlight() + Constants.MAX_SEGMENT_SIZE > effectiveWindowSize) {
+                    System.out.println("[TRANSFER] Congestion window filled. Waiting for ACKs...");
+                    windowFull = true;
+                }
             }
 
-            if (sequenceNumber >= windowTop) {
+            // Wait for ACKs to open the window only if window is actually full
+            if (windowFull && getBytesInFlight() >= effectiveWindowSize) {
                 long waitStart = System.currentTimeMillis();
-                long maxWait = 2000;
+                long maxWait = 8000;
+                long initialBytesInFlight = getBytesInFlight();
 
-                while (baseSequenceNumber == windowBase &&
+                while (getBytesInFlight() >= effectiveWindowSize &&
                         (System.currentTimeMillis() - waitStart) < maxWait &&
                         bytesSent < fileData.length) {
                     try {
-                        Thread.sleep(10);
+                        Thread.sleep(50);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         return;
                     }
+
+                    // Check if we received any ACKs during waiting
+                    if (getBytesInFlight() < initialBytesInFlight) {
+                        System.out.println("[TRANSFER] ACK received during wait, window opening");
+                        break;
+                    }
                 }
 
-                if (baseSequenceNumber > windowBase) {
-                    System.out.println("Window slid from [" + windowBase + "] to [" + baseSequenceNumber + "]");
+                if (getBytesInFlight() < initialBytesInFlight) {
+                    System.out.println("[TRANSFER] ACKs received, congestion window opened");
                 } else if (bytesSent < fileData.length) {
-                    System.out.println("Timeout waiting for ACKs, continuing...");
+                    System.out.println("[TRANSFER] Wait timeout, continuing to avoid deadlock...");
                 }
             }
 
@@ -217,9 +272,174 @@ public class Client {
             }
         }
 
-        System.out.println("All data sent using sliding window protocol!");
-        System.out.println("Total chunks sent: " + chunkNumber);
-        System.out.println("Waiting for final acknowledgments...");
+        System.out.println("[TRANSFER] File transfer completed successfully!");
+        System.out.println("[TRANSFER] Final congestion window: " + congestionWindow + " bytes");
+        System.out.println("[TRANSFER] Final state: " + congestionState);
+        System.out.println("[TRANSFER] Total chunks sent: " + chunkNumber);
+    }
+
+    private void handleAcks(DataInputStream in) {
+        try {
+            System.out.println("[ACK-RECEIVER] Thread started successfully");
+
+            while (ackReceiverRunning) {
+                try {
+                    Packet ackPacket = Packet.receivePacket(in);
+                    long receivedTime = System.currentTimeMillis();
+
+                    System.out.println("[ACK-RECEIVER] Received ACK for seq: " + ackPacket.getAckNumber() +
+                            " | Window: " + ackPacket.getWindowSize() +
+                            " | Time: "
+                            + new java.text.SimpleDateFormat("HH:mm:ss.SSS").format(new java.util.Date(receivedTime)));
+
+                    if (ackPacket.getAckFlag()) {
+                        long ackNum = ackPacket.getAckNumber();
+
+                        // Check for duplicate ACKs
+                        if (ackNum == lastAckReceived) {
+                            duplicateAckCount++;
+                            System.out.println("[ACK-RECEIVER] Duplicate ACK #" + duplicateAckCount +
+                                    " for seq: " + ackNum +
+                                    " | Total duplicates: " + duplicateAckCount);
+
+                            if (duplicateAckCount >= FAST_RETRANSMIT_THRESHOLD) {
+                                System.out.println(
+                                        "[ACK-RECEIVER] Triple duplicate ACK detected - triggering fast retransmit" +
+                                                " | ACK seq: " + ackNum +
+                                                " | Duplicate count: " + duplicateAckCount);
+                                handleFastRetransmit(ackNum);
+                                duplicateAckCount = 0;
+                            }
+                        } else {
+                            // New ACK received
+                            System.out.println("[ACK-RECEIVER] New ACK received" +
+                                    " | Previous: " + lastAckReceived +
+                                    " | Current: " + ackNum +
+                                    " | Resetting duplicate count from: " + duplicateAckCount);
+
+                            duplicateAckCount = 0;
+                            lastAckReceived = ackNum;
+
+                            int ackedBytes = processAck(ackNum);
+                            if (ackedBytes > 0) {
+                                updateCongestionControl(ackedBytes, false);
+                                System.out.println("[ACK-RECEIVER] Successfully processed ACK" +
+                                        " | Bytes acked: " + ackedBytes +
+                                        " | New CWND: " + congestionWindow + " bytes" +
+                                        " | In-flight: " + getBytesInFlight() + " bytes" +
+                                        " | State: " + congestionState);
+                            } else {
+                                System.out.println("[ACK-RECEIVER] No new bytes acknowledged" +
+                                        " | ACK num: " + ackNum +
+                                        " | Current base: " + baseSequenceNumber);
+                            }
+                        }
+                    } else {
+                        System.out.println("[ACK-RECEIVER] Received packet without ACK flag set" +
+                                " | Seq: " + ackPacket.getSequenceNumber() +
+                                " | ACK: " + ackPacket.getAckNumber());
+                    }
+                } catch (IOException e) {
+                    if (ackReceiverRunning) {
+                        System.err.println("[ACK-RECEIVER] Error receiving ACK packet: " + e.getMessage());
+                        e.printStackTrace();
+                    } else {
+                        System.out.println("[ACK-RECEIVER] Thread stopping - connection closed");
+                    }
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[ACK-RECEIVER] Unexpected error in ACK receiver thread: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        System.out.println("[ACK-RECEIVER] Thread terminated" +
+                " | Final state - Running: " + ackReceiverRunning +
+                " | Unacked packets: " + unackedPackets.size());
+    }
+
+    private void updateCongestionControl(int ackedBytes, boolean isTimeout) {
+        if (isTimeout) {
+            // Timeout occurred - reset to slow start
+            slowStartThreshold = Math.max(congestionWindow / 2, Constants.MAX_SEGMENT_SIZE);
+            congestionWindow = Constants.MAX_SEGMENT_SIZE;
+            congestionState = CongestionState.SLOW_START;
+            packetsSinceLastIncrease = 0;
+
+            System.out.println("[CONGESTION] Timeout - Resetting to Slow Start");
+            System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes");
+            System.out.println("[CONGESTION] New CWND: " + Constants.MAX_SEGMENT_SIZE + " bytes");
+            System.out.println("[CONGESTION] State: SLOW_START");
+            return;
+        }
+
+        switch (congestionState) {
+            case SLOW_START:
+                // Exponential growth: increase CWND by MSS for each ACK
+                congestionWindow += Constants.MAX_SEGMENT_SIZE;
+
+                System.out.println("[CONGESTION] Slow Start - CWND increased to " + congestionWindow +
+                        " bytes (" + (congestionWindow / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+
+                // Check if we should switch to congestion avoidance
+                if (congestionWindow >= slowStartThreshold) {
+                    congestionState = CongestionState.CONGESTION_AVOIDANCE;
+                    packetsSinceLastIncrease = 0;
+                    System.out.println("[CONGESTION] Switching to Congestion Avoidance (CWND >= ssthresh)");
+                }
+                break;
+
+            case CONGESTION_AVOIDANCE:
+                // Linear growth: increase CWND by MSS/CWND for each ACK
+                packetsSinceLastIncrease += ackedBytes;
+
+                if (packetsSinceLastIncrease >= congestionWindow) {
+                    congestionWindow += Constants.MAX_SEGMENT_SIZE;
+                    packetsSinceLastIncrease = 0;
+
+                    System.out.println("[CONGESTION] Congestion Avoidance - CWND increased to " +
+                            congestionWindow + " bytes (" +
+                            (congestionWindow / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+                }
+                break;
+
+            case FAST_RECOVERY:
+                // Check if we can exit fast recovery
+                if (lastAckReceived > fastRecoverySequence) {
+                    // New ACK received, exit fast recovery
+                    congestionWindow = slowStartThreshold;
+                    congestionState = CongestionState.CONGESTION_AVOIDANCE;
+                    packetsSinceLastIncrease = 0;
+
+                    System.out.println("[CONGESTION] Exiting Fast Recovery");
+                    System.out.println("[CONGESTION] CWND set to ssthresh: " + congestionWindow + " bytes");
+                    System.out.println("[CONGESTION] State: CONGESTION_AVOIDANCE");
+                }
+                break;
+        }
+
+        // Ensure minimum window size
+        if (congestionWindow < Constants.MAX_SEGMENT_SIZE) {
+            congestionWindow = Constants.MAX_SEGMENT_SIZE;
+        }
+    }
+
+    private void handleFastRetransmit(long ackNum) {
+        // Enter fast recovery
+        if (congestionState != CongestionState.FAST_RECOVERY) {
+            slowStartThreshold = Math.max(congestionWindow / 2, Constants.MAX_SEGMENT_SIZE);
+            congestionWindow = slowStartThreshold + 3 * Constants.MAX_SEGMENT_SIZE;
+            congestionState = CongestionState.FAST_RECOVERY;
+            fastRecoverySequence = ackNum;
+
+            System.out.println("[FAST-RETRANSMIT] Entering Fast Recovery");
+            System.out.println("[FAST-RETRANSMIT] New ssthresh: " + slowStartThreshold + " bytes");
+            System.out.println("[FAST-RETRANSMIT] New CWND: " + congestionWindow + " bytes");
+        }
+
+        // Trigger the actual retransmission
+        triggerFastRetransmit(ackNum);
     }
 
     private boolean shouldDropPacket() {
@@ -232,8 +452,9 @@ public class Client {
 
         if (shouldDropPacket()) {
             packetsDropped++;
-            System.out.println("*** SIMULATED PACKET LOSS *** Dropping packet with seq: " + seqNum +
-                    " (Loss rate: " + packetsDropped + "/" + totalPacketsSent + ")");
+            System.out.println("[LOSS] Simulated packet loss - seq: " + seqNum +
+                    " | Loss rate: " + packetsDropped + "/" + totalPacketsSent +
+                    " (" + String.format("%.1f", (packetsDropped * 100.0 / totalPacketsSent)) + "%)");
 
             UnackedPacket unackedPacket = new UnackedPacket(packet);
             unackedPacket.sendTime = System.currentTimeMillis();
@@ -249,52 +470,24 @@ public class Client {
         scheduleRetransmission(seqNum, out);
     }
 
-    private void handleAcks(DataInputStream in) {
-        try {
-            while (ackReceiverRunning && !Thread.currentThread().isInterrupted()) {
-                Packet ackPacket = Packet.receivePacket(in);
-
-                if (ackPacket.getAckFlag()) {
-                    long ackNum = ackPacket.getAckNumber();
-
-                    if (ackNum == lastAckReceived) {
-                        duplicateAckCount++;
-                        System.out.println("Duplicate ACK received (" + duplicateAckCount + "/3) for seq: " + ackNum);
-
-                        if (duplicateAckCount >= FAST_RETRANSMIT_THRESHOLD) {
-                            System.out.println(
-                                    "*** FAST RETRANSMIT *** Triple duplicate ACK detected for seq: " + ackNum);
-                            triggerFastRetransmit(ackNum);
-                            duplicateAckCount = 0;
-                        }
-                    } else {
-
-                        if (ackNum > lastAckReceived) {
-                            duplicateAckCount = 0;
-                            lastAckReceived = ackNum;
-                            processAck(ackNum);
-                        }
-                    }
-
-                    serverWindowSize = ackPacket.getWindowSize();
-                }
-            }
-        } catch (IOException e) {
-            if (ackReceiverRunning) {
-                System.out.println("ACK handler thread terminated: " + e.getMessage());
-            }
-        }
-    }
-
     private void triggerFastRetransmit(long ackNum) {
+        // Find the packet that the receiver is expecting (the missing packet)
+        Long seqToRetransmit = null;
 
+        // Look for the earliest unacknowledged packet
         for (Map.Entry<Long, UnackedPacket> entry : unackedPackets.entrySet()) {
             long seqNum = entry.getKey();
-            if (seqNum >= ackNum) {
-                System.out.println("Fast retransmitting packet with seq: " + seqNum);
-                retransmitPacketImmediately(seqNum);
-                break;
+            if (seqToRetransmit == null || seqNum < seqToRetransmit) {
+                seqToRetransmit = seqNum;
             }
+        }
+
+        if (seqToRetransmit != null) {
+            System.out.println("[FAST-RETRANSMIT] Retransmitting seq: " + seqToRetransmit +
+                    " (ACK expecting: " + ackNum + ")");
+            retransmitPacketImmediately(seqToRetransmit);
+        } else {
+            System.out.println("[FAST-RETRANSMIT] No packet found for retransmission (ACK: " + ackNum + ")");
         }
     }
 
@@ -310,28 +503,33 @@ public class Client {
 
             if (shouldDropPacket()) {
                 packetsDropped++;
-                System.out.println("*** FAST RETRANSMISSION DROPPED *** seq: " + seqNum);
+                System.out.println("[LOSS] Fast retransmission dropped - seq: " + seqNum);
                 return;
             }
 
             unackedPacket.packet.sendPacket(getCurrentOutputStream());
-            System.out.println("Fast retransmitted packet (seq: " + seqNum + ")");
+            System.out.println("[FAST-RETRANSMIT] Packet retransmitted - seq: " + seqNum);
 
         } catch (IOException e) {
-            System.err.println("Error in fast retransmit: " + e.getMessage());
+            System.err.println("[ERROR] Fast retransmit failed: " + e.getMessage());
         }
     }
-
-    private DataOutputStream currentOutputStream;
 
     private DataOutputStream getCurrentOutputStream() {
         return currentOutputStream;
     }
 
-    private void processAck(long ackNum) {
+    private int processAck(long ackNum) {
+        System.out.println("[ACK-PROCESSOR] Starting ACK processing" +
+                " | ACK num: " + ackNum +
+                " | Current base: " + baseSequenceNumber +
+                " | Unacked packets: " + unackedPackets.size());
+
         Iterator<Map.Entry<Long, UnackedPacket>> iterator = unackedPackets.entrySet().iterator();
         int ackedPackets = 0;
+        int ackedBytes = 0;
         long oldBase = baseSequenceNumber;
+        long newBase = baseSequenceNumber;
 
         while (iterator.hasNext()) {
             Map.Entry<Long, UnackedPacket> entry = iterator.next();
@@ -341,49 +539,92 @@ public class Client {
             long endSeqNum = seqNum + packet.packet.getPayload().length;
 
             if (endSeqNum <= ackNum) {
+                // This packet is acknowledged
+                System.out.println("[ACK-PROCESSOR] Acknowledging packet" +
+                        " | Seq: " + seqNum +
+                        " | End seq: " + endSeqNum +
+                        " | Size: " + packet.packet.getPayload().length + " bytes" +
+                        " | Retry count: " + packet.retryCount);
 
                 if (packet.retryCount == 0) {
                     long currentTime = System.currentTimeMillis();
                     double sampleRTT = currentTime - packet.sendTime;
                     updateRTTEstimates(sampleRTT);
+                } else {
+                    System.out.println("[ACK-PROCESSOR] Skipping RTT calculation for retransmitted packet" +
+                            " | Seq: " + seqNum +
+                            " | Retry count: " + packet.retryCount);
                 }
 
+                ackedBytes += packet.packet.getPayload().length;
                 iterator.remove();
                 ackedPackets++;
 
-                if (endSeqNum > baseSequenceNumber) {
-                    baseSequenceNumber = endSeqNum;
+                if (endSeqNum > newBase) {
+                    newBase = endSeqNum;
                 }
+            } else {
+                System.out.println("[ACK-PROCESSOR] Packet still unacknowledged" +
+                        " | Seq: " + seqNum +
+                        " | End seq: " + endSeqNum +
+                        " | ACK num: " + ackNum +
+                        " | Size: " + packet.packet.getPayload().length + " bytes");
             }
         }
 
-        if (ackedPackets > 0) {
-            System.out.println("ACK received for " + ackedPackets + " packet(s), ACK num: " + ackNum +
-                    " - Window slid from " + oldBase + " to " + baseSequenceNumber +
-                    " - EstRTT: " + String.format("%.2f", estimatedRTT) + "ms");
+        // Update base sequence number
+        if (newBase > oldBase) {
+            baseSequenceNumber = newBase;
+            System.out.println("[ACK-PROCESSOR] Sliding window advanced" +
+                    " | Old base: " + oldBase +
+                    " | New base: " + newBase +
+                    " | Window moved by: " + (newBase - oldBase) + " bytes");
         }
+
+        if (ackedPackets > 0) {
+            System.out.println("[ACK-PROCESSOR] ACK processing completed successfully" +
+                    " | Packets acked: " + ackedPackets +
+                    " | Bytes acked: " + ackedBytes +
+                    " | ACK num: " + ackNum +
+                    " | Window: " + oldBase + " -> " + baseSequenceNumber +
+                    " | Remaining unacked: " + unackedPackets.size() + " packets" +
+                    " | EstRTT: " + String.format("%.2f", estimatedRTT) + "ms" +
+                    " | Current CWND: " + congestionWindow + " bytes");
+        } else {
+            System.out.println("[ACK-PROCESSOR] No packets acknowledged" +
+                    " | ACK num: " + ackNum +
+                    " | Current base: " + baseSequenceNumber +
+                    " | Unacked packets: " + unackedPackets.size() +
+                    " | Possible duplicate or out-of-order ACK");
+        }
+
+        return ackedBytes;
     }
 
     private void updateRTTEstimates(double sampleRTT) {
         if (estimatedRTT == 1000.0) {
-
             estimatedRTT = sampleRTT;
             devRTT = sampleRTT / 2.0;
         } else {
-
             devRTT = (1 - BETA) * devRTT + BETA * Math.abs(sampleRTT - estimatedRTT);
             estimatedRTT = (1 - ALPHA) * estimatedRTT + ALPHA * sampleRTT;
         }
 
-        System.out.println("RTT Update - Sample: " + String.format("%.2f", sampleRTT) +
-                "ms, Estimated: " + String.format("%.2f", estimatedRTT) +
-                "ms, Dev: " + String.format("%.2f", devRTT) + "ms");
+        System.out.println("[RTT] Sample: " + String.format("%.2f", sampleRTT) + "ms" +
+                " | Estimated: " + String.format("%.2f", estimatedRTT) + "ms" +
+                " | Deviation: " + String.format("%.2f", devRTT) + "ms");
     }
 
     private long calculateTimeoutInterval() {
         double timeoutInterval = estimatedRTT + 4 * devRTT;
-
-        return Math.max(100, Math.min(5000, (long) timeoutInterval));
+        // More conservative timeout for initial packets and small windows
+        if (totalPacketsSent <= 5 || congestionWindow <= 2 * Constants.MAX_SEGMENT_SIZE) {
+            timeoutInterval = Math.max(5000, timeoutInterval); // At least 5 seconds for first few packets or small
+                                                               // windows
+        } else {
+            timeoutInterval = Math.max(1000, timeoutInterval); // At least 1 second for subsequent packets
+        }
+        return Math.min(15000, (long) timeoutInterval); // Cap at 15 seconds
     }
 
     private void scheduleRetransmission(long seqNum, DataOutputStream out) {
@@ -403,7 +644,7 @@ public class Client {
         }
 
         if (unackedPacket.retryCount >= Constants.MAX_RETRIES) {
-            System.err.println("Max retries exceeded for packet with seq: " + seqNum);
+            System.err.println("[ERROR] Max retries exceeded for seq: " + seqNum);
             unackedPackets.remove(seqNum);
             return;
         }
@@ -412,28 +653,35 @@ public class Client {
             unackedPacket.retryCount++;
             unackedPacket.timestamp = System.currentTimeMillis();
 
+            // Only update congestion control on first timeout of a packet
+            if (unackedPacket.retryCount == 1) {
+                updateCongestionControl(0, true);
+            }
+
             if (shouldDropPacket()) {
                 packetsDropped++;
-                System.out.println("*** RETRANSMISSION DROPPED *** Dropping retransmitted packet with seq: " + seqNum +
-                        " (retry: " + unackedPacket.retryCount + ")");
+                System.out.println("[LOSS] Retransmission dropped - seq: " + seqNum +
+                        " | Retry: " + unackedPacket.retryCount);
                 scheduleRetransmission(seqNum, out);
                 return;
             }
 
             unackedPacket.packet.sendPacket(out);
-            System.out.println("Retransmitting packet (seq: " + seqNum +
-                    ", retry: " + unackedPacket.retryCount + ", timeout: " + calculateTimeoutInterval() + "ms)");
+            System.out.println("[RETRANSMIT] Packet retransmitted - seq: " + seqNum +
+                    " | Retry: " + unackedPacket.retryCount +
+                    " | Timeout: " + calculateTimeoutInterval() + "ms");
 
             scheduleRetransmission(seqNum, out);
 
         } catch (IOException e) {
-            System.err.println("Error retransmitting packet: " + e.getMessage());
+            System.err.println("[ERROR] Retransmission failed: " + e.getMessage());
         }
     }
 
     private void waitForAllAcks() {
-        System.out.println("Waiting for all packets to be acknowledged...");
-        System.out.println("Packet loss statistics - Dropped: " + packetsDropped + "/" + totalPacketsSent +
+        System.out.println("[TRANSFER] Waiting for all packets to be acknowledged...");
+        System.out.println("[TRANSFER] Packet loss statistics - Dropped: " + packetsDropped +
+                "/" + totalPacketsSent +
                 " (" + String.format("%.1f", (packetsDropped * 100.0 / totalPacketsSent)) + "%)");
 
         long waitStart = System.currentTimeMillis();
@@ -450,12 +698,17 @@ public class Client {
         }
 
         if (unackedPackets.isEmpty()) {
-            System.out.println("All packets acknowledged successfully despite packet loss!");
-            System.out.println("Final statistics - Total sent: " + totalPacketsSent +
-                    ", Dropped: " + packetsDropped +
+            System.out.println("[TRANSFER] All packets acknowledged successfully!");
+            System.out.println("[TRANSFER] Final congestion control state:");
+            System.out.println("[TRANSFER] Final CWND: " + congestionWindow + " bytes (" +
+                    (congestionWindow / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+            System.out.println("[TRANSFER] Final ssthresh: " + slowStartThreshold + " bytes");
+            System.out.println("[TRANSFER] Final state: " + congestionState);
+            System.out.println("[TRANSFER] Total sent: " + totalPacketsSent +
+                    " | Dropped: " + packetsDropped +
                     " (" + String.format("%.1f", (packetsDropped * 100.0 / totalPacketsSent)) + "%)");
         } else {
-            System.err.println("Timeout waiting for acknowledgments. " +
+            System.err.println("[ERROR] Timeout waiting for acknowledgments. " +
                     unackedPackets.size() + " packets still unacked.");
         }
     }
@@ -471,15 +724,16 @@ public class Client {
         finPacket.setWindowSize(Constants.CLIENT_WINDOW_SIZE);
 
         finPacket.sendPacket(out);
-        System.out.println("Sent FIN packet");
+        System.out.println("[CLOSE] FIN packet sent");
 
         try {
             Packet finAckPacket = Packet.receivePacket(in);
             if (finAckPacket.getFinFlag() && finAckPacket.getAckFlag()) {
-                System.out.println("Received FIN-ACK packet");
+                System.out.println("[CLOSE] FIN-ACK packet received");
 
                 sequenceNumber++;
                 ackNumber = finAckPacket.getSequenceNumber() + 1;
+
                 Packet finalAckPacket = new Packet();
                 finalAckPacket.setSourcePort(Constants.CLIENT_PORT);
                 finalAckPacket.setDestinationPort(Constants.SERVER_PORT);
@@ -489,7 +743,7 @@ public class Client {
                 finalAckPacket.setWindowSize(Constants.CLIENT_WINDOW_SIZE);
 
                 finalAckPacket.sendPacket(out);
-                System.out.println("Sent final ACK packet - Connection closed");
+                System.out.println("[CLOSE] Final ACK packet sent - Connection closed successfully");
 
                 try {
                     Thread.sleep(100);
@@ -498,11 +752,19 @@ public class Client {
                 }
             }
         } catch (IOException e) {
-            System.out.println("Connection closed by server");
+            System.out.println("[CLOSE] Connection closed by server");
         }
     }
 
     private long getBytesInFlight() {
         return sequenceNumber - baseSequenceNumber;
+    }
+
+    private void debugPacketTiming(long seqNum, String action) {
+        long currentTime = System.currentTimeMillis();
+        System.out.println("[DEBUG] " + action + " - seq: " + seqNum +
+                " | time: " + currentTime +
+                " | in-flight: " + getBytesInFlight() +
+                " | cwnd: " + congestionWindow);
     }
 }
