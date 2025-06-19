@@ -8,7 +8,6 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -18,16 +17,12 @@ import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class Client {
-    // Add this field to track the last window size before any timeout in the current sequence
-    private int lastGoodCongestionWindow = -1;
-    private long lastTimeoutTime = 0;
-    private static final long TIMEOUT_SEQUENCE_WINDOW = 5000; // 5 seconds
 
     // TCP Variant Selection
     private enum TcpVariant {
         TAHOE, RENO
     }
-    
+
     private TcpVariant tcpVariant = TcpVariant.RENO; // Default to Reno
 
     private static class CwndLogEntry {
@@ -65,7 +60,7 @@ public class Client {
     private long baseSequenceNumber;
     private volatile boolean ackReceiverRunning = true;
 
-    private static final double PACKET_LOSS_RATE = 0.05;
+    private static final double PACKET_LOSS_RATE = 0.01;
     private int totalPacketsSent = 0;
     private int packetsDropped = 0;
 
@@ -80,7 +75,7 @@ public class Client {
 
     // Congestion Control Variables
     private int congestionWindow = Constants.MAX_SEGMENT_SIZE; // Start with 1 MSS
-    private int slowStartThreshold = 730*10; // Initial high value
+    private int slowStartThreshold = 730 * 10; // Initial high value
 
     private enum CongestionState {
         SLOW_START, CONGESTION_AVOIDANCE, FAST_RECOVERY
@@ -102,16 +97,16 @@ public class Client {
 
     private void selectTcpVariant() {
         Scanner scanner = new Scanner(System.in);
-        
+
         System.out.println("=== TCP Congestion Control Variant Selection ===");
         System.out.println("1. TCP Tahoe (no fast recovery)");
         System.out.println("2. TCP Reno (with fast recovery)");
         System.out.print("Enter your choice (1 or 2): ");
-        
+
         while (true) {
             try {
                 int choice = scanner.nextInt();
-                
+
                 if (choice == 1) {
                     tcpVariant = TcpVariant.TAHOE;
                     System.out.println("[TCP-VARIANT] Selected: TCP Tahoe");
@@ -122,7 +117,8 @@ public class Client {
                     tcpVariant = TcpVariant.RENO;
                     System.out.println("[TCP-VARIANT] Selected: TCP Reno");
                     System.out.println("[TCP-VARIANT] Fast recovery: ENABLED");
-                    System.out.println("[TCP-VARIANT] Triple duplicate ACKs will trigger fast retransmit and fast recovery");
+                    System.out.println(
+                            "[TCP-VARIANT] Triple duplicate ACKs will trigger fast retransmit and fast recovery");
                     break;
                 } else {
                     System.out.print("Invalid choice. Please enter 1 or 2: ");
@@ -132,7 +128,7 @@ public class Client {
                 scanner.nextLine(); // Clear invalid input
             }
         }
-        
+
         System.out.println("================================================\n");
     }
 
@@ -334,11 +330,12 @@ public class Client {
 
                             if (duplicateAckCount >= FAST_RETRANSMIT_THRESHOLD) {
                                 System.out.println(
-                                        "[ACK-RECEIVER] Triple duplicate ACK detected - triggering " + 
-                                        (tcpVariant == TcpVariant.RENO ? "fast retransmit" : "timeout behavior") +
-                                        " | ACK seq: " + ackNum +
-                                        " | Duplicate count: " + duplicateAckCount);
-                                
+                                        "[ACK-RECEIVER] Triple duplicate ACK detected - triggering " +
+                                                (tcpVariant == TcpVariant.RENO ? "fast retransmit" : "timeout behavior")
+                                                +
+                                                " | ACK seq: " + ackNum +
+                                                " | Duplicate count: " + duplicateAckCount);
+
                                 if (tcpVariant == TcpVariant.RENO) {
                                     handleFastRetransmit(ackNum);
                                 } else { // TCP Tahoe
@@ -397,38 +394,19 @@ public class Client {
 
     private void updateCongestionControl(int ackedBytes, boolean isTimeout) {
         if (isTimeout) {
-            // Check if this is part of a timeout sequence
-            long currentTime = System.currentTimeMillis();
-            boolean isSequentialTimeout = (currentTime - lastTimeoutTime) < TIMEOUT_SEQUENCE_WINDOW;
-            
-            int windowForSsthresh;
-            if (isSequentialTimeout && lastGoodCongestionWindow > 0) {
-                // Use the last good window size before the timeout sequence started
-                windowForSsthresh = lastGoodCongestionWindow;
-                System.out.println("[CONGESTION] Sequential timeout detected - using last good CWND: " + 
-                        windowForSsthresh + " bytes for ssthresh calculation");
-            } else {
-                // First timeout in sequence - save current window as last good window
-                windowForSsthresh = congestionWindow;
-                lastGoodCongestionWindow = congestionWindow;
-                System.out.println("[CONGESTION] First timeout in sequence - saving CWND: " + 
-                        windowForSsthresh + " bytes as last good window");
-            }
-            
-            lastTimeoutTime = currentTime;
-            
-            slowStartThreshold = Math.max(windowForSsthresh / 2, Constants.MAX_SEGMENT_SIZE);
-            congestionWindow = Constants.MAX_SEGMENT_SIZE; // This should be 1 MSS
+            // FIXED: Save old congestion window first, then use it to calculate ssthresh
+            int oldCongestionWindow = congestionWindow;
+            slowStartThreshold = Math.max(oldCongestionWindow / 2, Constants.MAX_SEGMENT_SIZE);
+            congestionWindow = Constants.MAX_SEGMENT_SIZE;
             congestionState = CongestionState.SLOW_START;
             packetsSinceLastIncrease = 0;
 
             System.out.println("[CONGESTION] Timeout - Resetting to Slow Start (" + tcpVariant + ")");
-            System.out.println("[CONGESTION] Window used for ssthresh calc: " + windowForSsthresh + " bytes");
-            System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes (" +
-                    (slowStartThreshold / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-            System.out.println("[CONGESTION] New CWND: " + congestionWindow + " bytes (1 MSS)"); // Updated log
+            System.out.println("[CONGESTION] Old CWND: " + oldCongestionWindow + " bytes");
+            System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes");
+            System.out.println("[CONGESTION] New CWND: " + Constants.MAX_SEGMENT_SIZE + " bytes");
             System.out.println("[CONGESTION] State: SLOW_START");
-            
+
             cwndLog.add(new CwndLogEntry(
                     System.currentTimeMillis() - startTime,
                     totalPacketsSent,
@@ -436,12 +414,6 @@ public class Client {
                     "TIMEOUT",
                     congestionState, slowStartThreshold, estimatedRTT));
             return;
-        } else {
-            // Successful ACK received - reset the timeout sequence tracking
-            if (ackedBytes > 0) {
-                lastGoodCongestionWindow = -1; // Reset - we're making progress again
-                System.out.println("[CONGESTION] Progress made - resetting timeout sequence tracking");
-            }
         }
 
         switch (congestionState) {
@@ -495,7 +467,7 @@ public class Client {
                             congestionState, slowStartThreshold, estimatedRTT));
                 } else {
                     // Log the progress towards next increase
-                    System.out.println("[CONGESTION] CA Progress: " + packetsSinceLastIncrease + 
+                    System.out.println("[CONGESTION] CA Progress: " + packetsSinceLastIncrease +
                             "/" + congestionWindow + " bytes toward next increase");
                 }
                 break;
@@ -534,54 +506,6 @@ public class Client {
         }
     }
 
-    private void updateCongestionControlWithSavedCwnd(int ackedBytes, boolean isTimeout, int oldCongestionWindow) {
-        if (isTimeout) {
-            // Check if this is part of a timeout sequence
-            long currentTime = System.currentTimeMillis();
-            boolean isSequentialTimeout = (currentTime - lastTimeoutTime) < TIMEOUT_SEQUENCE_WINDOW;
-            
-            int windowForSsthresh;
-            if (isSequentialTimeout && lastGoodCongestionWindow > 0) {
-                // Use the last good window size before the timeout sequence started
-                windowForSsthresh = lastGoodCongestionWindow;
-                System.out.println("[CONGESTION] Sequential timeout detected - using last good CWND: " + 
-                        windowForSsthresh + " bytes for ssthresh calculation");
-            } else {
-                // First timeout in sequence - use the provided old window
-                windowForSsthresh = oldCongestionWindow;
-                lastGoodCongestionWindow = oldCongestionWindow;
-                System.out.println("[CONGESTION] First timeout in sequence - saving old CWND: " + 
-                        windowForSsthresh + " bytes as last good window");
-            }
-            
-            lastTimeoutTime = currentTime;
-            
-            // Use the appropriate window size for ssthresh calculation
-            slowStartThreshold = Math.max(windowForSsthresh / 2, Constants.MAX_SEGMENT_SIZE);
-            congestionWindow = Constants.MAX_SEGMENT_SIZE; // This should be 1 MSS
-            congestionState = CongestionState.SLOW_START;
-            packetsSinceLastIncrease = 0;
-
-            System.out.println("[CONGESTION] Timeout - Resetting to Slow Start");
-            System.out.println("[CONGESTION] Window used for ssthresh calc: " + windowForSsthresh + " bytes");
-            System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes (" +
-                    (slowStartThreshold / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-            System.out.println("[CONGESTION] New CWND: " + congestionWindow + " bytes (1 MSS)"); // Updated log
-            System.out.println("[CONGESTION] State: SLOW_START");
-
-            cwndLog.add(new CwndLogEntry(
-                    System.currentTimeMillis() - startTime,
-                    totalPacketsSent,
-                    congestionWindow,
-                    "TIMEOUT",
-                    congestionState, slowStartThreshold, estimatedRTT));
-            return;
-        }
-
-        // For non-timeout cases, use the regular method
-        updateCongestionControl(ackedBytes, isTimeout);
-    }
-
     private void handleFastRetransmit(long ackNum) {
         // Only for TCP Reno - enter fast recovery
         if (tcpVariant == TcpVariant.RENO) {
@@ -604,11 +528,6 @@ public class Client {
                 System.out.println("[FAST-RETRANSMIT] Old CWND: " + oldCongestionWindow + " bytes");
                 System.out.println("[FAST-RETRANSMIT] New ssthresh: " + slowStartThreshold + " bytes");
                 System.out.println("[FAST-RETRANSMIT] New CWND: " + congestionWindow + " bytes");
-            } else {
-                // Already in fast recovery - just increment CWND for additional duplicate ACKs
-                congestionWindow += Constants.MAX_SEGMENT_SIZE;
-                System.out.println("[FAST-RETRANSMIT] Already in Fast Recovery - inflating CWND to: " + 
-                        congestionWindow + " bytes (ssthresh unchanged: " + slowStartThreshold + " bytes)");
             }
         }
 
@@ -619,11 +538,11 @@ public class Client {
     private void handleTahoeTripleDupAck(long ackNum) {
         // TCP Tahoe behavior: treat triple duplicate ACK like a timeout
         System.out.println("[FAST-RETRANSMIT] TCP Tahoe - treating triple dup ACK as timeout");
-        
+
         // FIXED: Save old congestion window first
         int oldCongestionWindow = congestionWindow;
         slowStartThreshold = Math.max(oldCongestionWindow / 2, Constants.MAX_SEGMENT_SIZE);
-        congestionWindow = Constants.MAX_SEGMENT_SIZE; // This should be 1 MSS
+        congestionWindow = Constants.MAX_SEGMENT_SIZE;
         congestionState = CongestionState.SLOW_START;
         packetsSinceLastIncrease = 0;
 
@@ -637,7 +556,7 @@ public class Client {
         System.out.println("[FAST-RETRANSMIT] TCP Tahoe - Resetting to Slow Start");
         System.out.println("[FAST-RETRANSMIT] Old CWND: " + oldCongestionWindow + " bytes");
         System.out.println("[FAST-RETRANSMIT] New ssthresh: " + slowStartThreshold + " bytes");
-        System.out.println("[FAST-RETRANSMIT] New CWND: " + congestionWindow + " bytes (1 MSS)"); // Updated log
+        System.out.println("[FAST-RETRANSMIT] New CWND: " + Constants.MAX_SEGMENT_SIZE + " bytes");
         System.out.println("[FAST-RETRANSMIT] State: SLOW_START");
 
         // Trigger the actual retransmission
@@ -833,11 +752,11 @@ public class Client {
 
         // Less aggressive minimum timeouts
         if (totalPacketsSent <= 3) {
-            timeoutInterval = Math.max(1000, timeoutInterval); // 2 seconds for first few packets
+            timeoutInterval = Math.max(500, timeoutInterval); // 2 seconds for first few packets
         } else if (congestionWindow <= 2 * Constants.MAX_SEGMENT_SIZE) {
-            timeoutInterval = Math.max(200, timeoutInterval); // 1.5 seconds for small windows
+            timeoutInterval = Math.max(5, timeoutInterval); // 1.5 seconds for small windows
         } else {
-            timeoutInterval = Math.max(100, timeoutInterval); // 500ms minimum for normal operation
+            timeoutInterval = Math.max(5, timeoutInterval); // 500ms minimum for normal operation
         }
 
         // More reasonable maximum timeout
@@ -886,27 +805,22 @@ public class Client {
                 " | Time since sent: " + timeSinceSent + "ms" +
                 " | Expected timeout: " + calculateTimeoutInterval() + "ms" +
                 " | EstRTT: " + String.format("%.2f", estimatedRTT) + "ms" +
-                " | Retry count: " + unackedPacket.retryCount +
-                " | Current state: " + congestionState);
+                " | Retry count: " + unackedPacket.retryCount);
 
         try {
             unackedPacket.retryCount++;
             unackedPacket.timestamp = System.currentTimeMillis();
             unackedPacket.sendTime = System.currentTimeMillis();
 
-            // FIXED: Only apply timeout congestion control if NOT in fast recovery
-            // and timeout hasn't been processed yet
-            if (!unackedPacket.timeoutProcessed && congestionState != CongestionState.FAST_RECOVERY) {
+            // FIXED: Save the congestion window BEFORE any modifications
+            if (!unackedPacket.timeoutProcessed) {
                 int cwndBeforeTimeout = congestionWindow; // Capture current CWND
                 updateCongestionControlWithSavedCwnd(0, true, cwndBeforeTimeout);
                 unackedPacket.timeoutProcessed = true;
                 System.out.println("[CONGESTION] Timeout congestion control applied for seq: " + seqNum);
-            } else if (congestionState == CongestionState.FAST_RECOVERY) {
-                System.out.println("[CONGESTION] In Fast Recovery - timeout for seq: " + seqNum + 
-                        " does NOT modify ssthresh (preserved: " + slowStartThreshold + " bytes)");
             } else {
-                System.out.println("[CONGESTION] Timeout already processed for seq: " + seqNum + 
-                        " - skipping congestion control");
+                System.out.println(
+                        "[CONGESTION] Timeout already processed for seq: " + seqNum + " - skipping congestion control");
             }
 
             unackedPacket.packet.sendPacket(out);
@@ -922,53 +836,33 @@ public class Client {
     }
 
     // Add this new method to handle timeout with saved CWND
-    // private void updateCongestionControlWithSavedCwnd(int ackedBytes, boolean isTimeout, int oldCongestionWindow) {
-    //     if (isTimeout) {
-    //         // Check if this is part of a timeout sequence
-    //         long currentTime = System.currentTimeMillis();
-    //         boolean isSequentialTimeout = (currentTime - lastTimeoutTime) < TIMEOUT_SEQUENCE_WINDOW;
-            
-    //         int windowForSsthresh;
-    //         if (isSequentialTimeout && lastGoodCongestionWindow > 0) {
-    //             // Use the last good window size before the timeout sequence started
-    //             windowForSsthresh = lastGoodCongestionWindow;
-    //             System.out.println("[CONGESTION] Sequential timeout detected - using last good CWND: " + 
-    //                     windowForSsthresh + " bytes for ssthresh calculation");
-    //         } else {
-    //             // First timeout in sequence - use the provided old window
-    //             windowForSsthresh = oldCongestionWindow;
-    //             lastGoodCongestionWindow = oldCongestionWindow;
-    //             System.out.println("[CONGESTION] First timeout in sequence - saving old CWND: " + 
-    //                     windowForSsthresh + " bytes as last good window");
-    //         }
-            
-    //         lastTimeoutTime = currentTime;
-            
-    //         // Use the appropriate window size for ssthresh calculation
-    //         slowStartThreshold = Math.max(windowForSsthresh / 2, Constants.MAX_SEGMENT_SIZE);
-    //         congestionWindow = Constants.MAX_SEGMENT_SIZE; // This should be 1 MSS
-    //         congestionState = CongestionState.SLOW_START;
-    //         packetsSinceLastIncrease = 0;
+    private void updateCongestionControlWithSavedCwnd(int ackedBytes, boolean isTimeout, int oldCongestionWindow) {
+        if (isTimeout) {
+            // Use the saved congestion window value for ssthresh calculation
+            slowStartThreshold = Math.max(oldCongestionWindow / 2, Constants.MAX_SEGMENT_SIZE);
+            congestionWindow = Constants.MAX_SEGMENT_SIZE;
+            congestionState = CongestionState.SLOW_START;
+            packetsSinceLastIncrease = 0;
 
-    //         System.out.println("[CONGESTION] Timeout - Resetting to Slow Start");
-    //         System.out.println("[CONGESTION] Window used for ssthresh calc: " + windowForSsthresh + " bytes");
-    //         System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes (" +
-    //                 (slowStartThreshold / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-    //         System.out.println("[CONGESTION] New CWND: " + congestionWindow + " bytes (1 MSS)"); // Updated log
-    //         System.out.println("[CONGESTION] State: SLOW_START");
+            System.out.println("[CONGESTION] Timeout - Resetting to Slow Start");
+            System.out.println("[CONGESTION] Old CWND: " + oldCongestionWindow + " bytes");
+            System.out.println("[CONGESTION] New ssthresh: " + slowStartThreshold + " bytes (" +
+                    (slowStartThreshold / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+            System.out.println("[CONGESTION] New CWND: " + Constants.MAX_SEGMENT_SIZE + " bytes");
+            System.out.println("[CONGESTION] State: SLOW_START");
 
-    //         cwndLog.add(new CwndLogEntry(
-    //                 System.currentTimeMillis() - startTime,
-    //                 totalPacketsSent,
-    //                 congestionWindow,
-    //                 "TIMEOUT",
-    //                 congestionState, slowStartThreshold, estimatedRTT));
-    //         return;
-    //     }
+            cwndLog.add(new CwndLogEntry(
+                    System.currentTimeMillis() - startTime,
+                    totalPacketsSent,
+                    congestionWindow,
+                    "TIMEOUT",
+                    congestionState, slowStartThreshold, estimatedRTT));
+            return;
+        }
 
-    //     // For non-timeout cases, use the regular method
-    //     updateCongestionControl(ackedBytes, isTimeout);
-    // }
+        // For non-timeout cases, use the regular method
+        updateCongestionControl(ackedBytes, isTimeout);
+    }
 
     private void waitForAllAcks() {
         System.out.println("[TRANSFER] Waiting for all packets to be acknowledged...");
@@ -1006,13 +900,13 @@ public class Client {
     }
 
     private void logCwndHistory() {
-        String csvFileName = "cwnd_log_"  + System.currentTimeMillis() + ".csv";
-        
+        String csvFileName = "cwnd_log_" + System.currentTimeMillis()
+                + ".csv";
+
         try (PrintWriter writer = new PrintWriter(new FileWriter(csvFileName))) {
             // Write CSV header with TCP variant info
-            // writer.println("# TCP Variant: " + tcpVariant);
             writer.println("Time_ms,Packet_Number,CWND_bytes,CWND_MSS,SSThresh,RTT_ms,Event,State");
-            
+
             // Write data rows
             for (CwndLogEntry entry : cwndLog) {
                 int cwndInMss = entry.cwndValue / Constants.MAX_SEGMENT_SIZE;
@@ -1026,31 +920,35 @@ public class Client {
                         entry.event,
                         entry.state);
             }
-            
+
             System.out.println("[CWND-LOG] CWND history saved to: " + csvFileName);
             System.out.println("[CWND-LOG] TCP Variant: " + tcpVariant);
             System.out.println("[CWND-LOG] Total entries logged: " + cwndLog.size());
-            
+
             // Print summary statistics to console
             if (!cwndLog.isEmpty()) {
                 int maxCwnd = cwndLog.stream().mapToInt(e -> e.cwndValue).max().orElse(0);
                 int minCwnd = cwndLog.stream().mapToInt(e -> e.cwndValue).min().orElse(0);
                 double avgCwnd = cwndLog.stream().mapToInt(e -> e.cwndValue).average().orElse(0);
                 long duration = cwndLog.get(cwndLog.size() - 1).timestamp;
-                
+
                 System.out.println("[CWND-LOG] Transfer Statistics (" + tcpVariant + "):");
                 System.out.println("[CWND-LOG]   Duration: " + duration + "ms");
-                System.out.println("[CWND-LOG]   Max CWND: " + maxCwnd + " bytes (" + (maxCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-                System.out.println("[CWND-LOG]   Min CWND: " + minCwnd + " bytes (" + (minCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-                System.out.println("[CWND-LOG]   Avg CWND: " + String.format("%.2f", avgCwnd) + " bytes (" + String.format("%.2f", avgCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
-                
+                System.out.println("[CWND-LOG]   Max CWND: " + maxCwnd + " bytes ("
+                        + (maxCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+                System.out.println("[CWND-LOG]   Min CWND: " + minCwnd + " bytes ("
+                        + (minCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+                System.out.println("[CWND-LOG]   Avg CWND: " + String.format("%.2f", avgCwnd) + " bytes ("
+                        + String.format("%.2f", avgCwnd / Constants.MAX_SEGMENT_SIZE) + " MSS)");
+
                 // Count different event types
                 long timeouts = cwndLog.stream().filter(e -> e.event.equals("TIMEOUT")).count();
                 long fastRetransmitsReno = cwndLog.stream().filter(e -> e.event.equals("FAST_RETRANSMIT_RENO")).count();
-                long fastRetransmitsTahoe = cwndLog.stream().filter(e -> e.event.equals("FAST_RETRANSMIT_TAHOE")).count();
+                long fastRetransmitsTahoe = cwndLog.stream().filter(e -> e.event.equals("FAST_RETRANSMIT_TAHOE"))
+                        .count();
                 long slowStartIncreases = cwndLog.stream().filter(e -> e.event.equals("SLOW_START_INCREASE")).count();
                 long caIncreases = cwndLog.stream().filter(e -> e.event.equals("CA_INCREASE")).count();
-                
+
                 System.out.println("[CWND-LOG]   Events Summary:");
                 System.out.println("[CWND-LOG]     Timeouts: " + timeouts);
                 if (tcpVariant == TcpVariant.RENO) {
@@ -1061,7 +959,7 @@ public class Client {
                 System.out.println("[CWND-LOG]     Slow Start Increases: " + slowStartIncreases);
                 System.out.println("[CWND-LOG]     Congestion Avoidance Increases: " + caIncreases);
             }
-            
+
         } catch (IOException e) {
             System.err.println("[ERROR] Failed to write CWND log to CSV file: " + e.getMessage());
             // Fall back to console logging
@@ -1069,7 +967,7 @@ public class Client {
             logCwndToConsole();
         }
     }
-    
+
     private void logCwndToConsole() {
         System.out.println("\n[CWND-LOG] ==================== CONGESTION WINDOW HISTORY ====================");
         System.out.println(
@@ -1097,7 +995,6 @@ public class Client {
 
     private static class UnackedPacket {
         Packet packet;
-        long timestamp;
         long sendTime;
         int retryCount;
         boolean timeoutProcessed; // Add this flag
