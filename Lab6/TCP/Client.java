@@ -60,7 +60,7 @@ public class Client {
     private long baseSequenceNumber;
     private volatile boolean ackReceiverRunning = true;
 
-    private static final double PACKET_LOSS_RATE = 0.01;
+    private static final double PACKET_LOSS_RATE = 0.05;
     private int totalPacketsSent = 0;
     private int packetsDropped = 0;
 
@@ -752,11 +752,11 @@ public class Client {
 
         // Less aggressive minimum timeouts
         if (totalPacketsSent <= 3) {
-            timeoutInterval = Math.max(500, timeoutInterval); // 2 seconds for first few packets
+            timeoutInterval = Math.max(1000, timeoutInterval); // 2 seconds for first few packets
         } else if (congestionWindow <= 2 * Constants.MAX_SEGMENT_SIZE) {
-            timeoutInterval = Math.max(5, timeoutInterval); // 1.5 seconds for small windows
+            timeoutInterval = Math.max(100, timeoutInterval); // 1.5 seconds for small windows
         } else {
-            timeoutInterval = Math.max(5, timeoutInterval); // 500ms minimum for normal operation
+            timeoutInterval = Math.max(100, timeoutInterval); // 500ms minimum for normal operation
         }
 
         // More reasonable maximum timeout
@@ -997,6 +997,7 @@ public class Client {
         Packet packet;
         long sendTime;
         int retryCount;
+        long timestamp;
         boolean timeoutProcessed; // Add this flag
 
         public UnackedPacket(Packet packet) {
@@ -1007,4 +1008,4 @@ public class Client {
             this.timeoutProcessed = false; // Initialize to false
         }
     }
-}
+n}
