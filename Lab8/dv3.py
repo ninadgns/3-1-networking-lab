@@ -6,19 +6,28 @@ import logging
 from datetime import datetime
 
 class Router:
-    def __init__(self, router_id, verbose=False):
+    def __init__(self, router_id, verbose=False, log_file=None):
         self.id = router_id
         self.neighbors = {}  # {neighbor_id: cost}
         self.routing_table = {}  # {dest: {'cost': cost, 'next_hop': next_hop}}
         self.distance_vector = {}  # {dest: cost}
         self.verbose = verbose
+        self.log_file = log_file
+        self.messages_sent = 0  # Track messages sent by this router
+        self.messages_received = 0  # Track messages received by this router
         
     def log(self, message, level="INFO"):
         """Log messages with timestamp and router ID"""
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         prefix = f"[{timestamp}] Router {self.id} [{level}]:"
+        log_message = f"{prefix} {message}"
+        
         if self.verbose:
-            print(f"{prefix} {message}")
+            if self.log_file:
+                with open(self.log_file, 'a') as f:
+                    f.write(log_message + '\n')
+            else:
+                print(log_message)
         
     def initialize_routing_table(self, all_routers):
         """Initialize routing table with direct neighbors and infinity for others"""
@@ -62,12 +71,16 @@ class Router:
         if poison_reverse_applied and self.verbose:
             self.log(f"Poison reverse to {neighbor_id}: {poison_reverse_applied} -> ∞")
         
-        self.log(f"Sending distance vector to {neighbor_id}: {dict(vector)}")
+        # Increment message count for this router
+        self.messages_sent += 1
+        self.log(f"Sending distance vector to {neighbor_id}: {dict(vector)} (Message #{self.messages_sent})")
         return vector
     
     def update_routing_table(self, from_neighbor, received_vector):
         """Update routing table using Bellman-Ford algorithm"""
-        self.log(f"Processing distance vector from {from_neighbor}: {dict(received_vector)}")
+        # Increment message received count
+        self.messages_received += 1
+        self.log(f"Processing distance vector from {from_neighbor}: {dict(received_vector)} (Message #{self.messages_received} received)")
         changes_made = False
         updates_log = []
         
@@ -156,7 +169,7 @@ class Router:
 
 
 class Network:
-    def __init__(self, topology_file, verbose=False):
+    def __init__(self, topology_file, verbose=False, log_file=None):
         self.routers = {}
         self.topology_file = topology_file
         self.message_count = 0
@@ -164,13 +177,28 @@ class Network:
         self.start_time = time.time()
         self.iteration_count = 0
         self.verbose = verbose
+        self.log_file = log_file
+        
+        # Initialize log file if specified
+        if self.log_file:
+            with open(self.log_file, 'w') as f:
+                f.write(f"Distance Vector Routing Simulation Log\n")
+                f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Topology file: {self.topology_file}\n")
+                f.write("=" * 60 + "\n\n")
         
     def log(self, message, level="INFO"):
         """Log network-level messages"""
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         prefix = f"[{timestamp}] NETWORK [{level}]:"
+        log_message = f"{prefix} {message}"
+        
         if self.verbose:
-            print(f"{prefix} {message}")
+            if self.log_file:
+                with open(self.log_file, 'a') as f:
+                    f.write(log_message + '\n')
+            else:
+                print(log_message)
         
     def read_topology(self):
         """Read topology from file and initialize network"""
@@ -203,7 +231,7 @@ class Network:
         
         # Create routers
         for router_id in router_ids:
-            self.routers[router_id] = Router(router_id, self.verbose)
+            self.routers[router_id] = Router(router_id, self.verbose, self.log_file)
             self.log(f"Created router {router_id}")
         
         # Set up neighbors and costs
@@ -244,6 +272,11 @@ C D 2"""
         self.log("=== DISTANCE VECTOR EXCHANGE ROUND START ===")
         messages_sent = 0
         any_changes = False
+        router_message_counts = {}  # Track messages per router
+        
+        # Initialize message counts for all routers
+        for router_id in self.routers.keys():
+            router_message_counts[router_id] = 0
         
         # Collect all messages to be sent first
         messages = []
@@ -253,6 +286,12 @@ C D 2"""
                 if neighbor_id in self.routers:
                     vector = router.get_distance_vector_for_neighbor(neighbor_id)
                     messages.append((router.id, neighbor_id, vector))
+                    router_message_counts[router.id] += 1
+        
+        # Log per-router message counts
+        for router_id, count in router_message_counts.items():
+            if count > 0:
+                self.log(f"Router {router_id} sending {count} messages to neighbors")
         
         self.log(f"Prepared {len(messages)} distance vector messages")
         
@@ -270,6 +309,15 @@ C D 2"""
                 self.log(f"Router {receiver_id} made no changes")
         
         self.message_count += messages_sent
+        
+        # Print message summary
+        print(f"\n--- Message Exchange Summary ---")
+        for router_id, count in router_message_counts.items():
+            if count > 0:
+                total_sent = self.routers[router_id].messages_sent
+                total_received = self.routers[router_id].messages_received
+                print(f"Router {router_id}: Sent {count} messages this round ({total_sent} total), Received {total_received} total")
+        
         self.log(f"=== DISTANCE VECTOR EXCHANGE ROUND END: {messages_sent} messages, changes={any_changes} ===")
         return messages_sent, any_changes
     
@@ -293,9 +341,9 @@ C D 2"""
         router1_id, router2_id, old_cost = random.choice(edges)
         
         # Generate new cost (between 1 and 10)
-        new_cost = random.randint(1, 10)
+        new_cost = random.randint(1, 200)
         while new_cost == old_cost:
-            new_cost = random.randint(1, 10)
+            new_cost = random.randint(1, 200)
         
         self.log(f"=== LINK COST UPDATE: {router1_id} <-> {router2_id} from {old_cost} to {new_cost} ===", "UPDATE")
         
@@ -351,6 +399,15 @@ C D 2"""
         if elapsed_time > 0:
             print(f"Average messages per second: {self.message_count/elapsed_time:.2f}")
         print(f"Average messages per iteration: {self.message_count/max(1, self.iteration_count):.2f}")
+        
+        # Print per-router message statistics
+        print(f"\nPer-Router Message Statistics:")
+        print("Router | Messages Sent | Messages Received | Total Messages")
+        print("-" * 58)
+        for router_id in sorted(self.routers.keys()):
+            router = self.routers[router_id]
+            total_msgs = router.messages_sent + router.messages_received
+            print(f"{router_id:6} | {router.messages_sent:13} | {router.messages_received:17} | {total_msgs:13}")
         
         if self.verbose:
             print(f"\nCost update log:")
@@ -440,6 +497,12 @@ C D 2"""
                             self.print_all_routing_tables(current_time, "ROUTING TABLES AFTER COST CHANGE")
                             print(f"\n[Time = {current_time:.1f}s] Cost change triggered {messages_sent} messages")
                             
+                            # Show message activity after cost change
+                            print("--- Message Activity After Cost Change ---")
+                            for router_id in sorted(self.routers.keys()):
+                                router = self.routers[router_id]
+                                print(f"Router {router_id}: {router.messages_sent} sent, {router.messages_received} received")
+                            
                             # Check convergence after cost change
                             print(f"\n[Time = {current_time:.1f}s] Checking convergence after cost change...")
                             converged = self.check_convergence(10)
@@ -482,16 +545,31 @@ def main():
     verbose_input = input("Enable verbose logging? (y/N): ").strip().lower()
     verbose = verbose_input in ['y', 'yes', '1', 'true']
     
+    # Ask user for log file preference
+    log_file = None
+    if verbose:
+        log_file_input = input("Save logs to file? (y/N): ").strip().lower()
+        if log_file_input in ['y', 'yes', '1', 'true']:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = f"dv_simulation_{timestamp}.log"
+            print(f"Logs will be saved to: {log_file}")
+        else:
+            print("Logs will be displayed in console")
+    
     if verbose:
         print("Verbose logging ENABLED - detailed algorithm steps will be shown")
     else:
         print("Verbose logging DISABLED - only major events will be shown")
     
     # Create and run simulation
-    network = Network("topology.txt", verbose=verbose)
+    network = Network("topology.txt", verbose=verbose, log_file=log_file)
     
     # Run simulation: 90 seconds total, updates every 5s, cost changes every 30s
     network.run_simulation(duration=90, update_interval=5, cost_update_interval=30)
+    
+    # Final message about log file
+    if log_file and verbose:
+        print(f"\nDetailed logs have been saved to: {log_file}")
 
 
 if __name__ == "__main__":
