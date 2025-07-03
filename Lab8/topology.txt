@@ -1,0 +1,55 @@
+# Complex Network Topology for Distance Vector Routing - Multi-Iteration Convergence
+# Format: Router1 Router2 Cost
+# This network is designed to require multiple iterations for convergence
+# Features competing paths and cascading updates
+
+# Main linear chain (long path that will propagate slowly)
+A B 1
+B C 2
+C D 3
+D E 1
+E F 2
+F G 4
+
+# Alternative paths that create competition
+A H 10
+H I 1
+I J 1
+J K 1
+K G 1
+
+# Cross connections that create multiple route options
+B H 8
+C I 6
+D J 4
+E K 7
+
+# Additional connections that create more path options
+A L 15
+L M 2
+M N 1
+N G 3
+
+# Connections that will cause route changes in later iterations
+H L 5
+I M 3
+J N 2
+
+# Additional nodes that extend the network
+G O 1
+O P 2
+P Q 1
+Q R 3
+R S 1
+
+# Back connections that create cycles and alternative routes
+S A 20
+P H 12
+Q I 8
+R J 6
+S K 4
+
+# Final cross connections
+L O 9
+M P 7
+N Q 5
