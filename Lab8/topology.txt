@@ -1,0 +1,9 @@
+# Sample Network Topology for Distance Vector Routing
+# Format: Router1 Router2 Cost
+# This represents the example from the lab manual
+
+A B 2
+A C 5
+B C 1
+B D 3
+C D 2
