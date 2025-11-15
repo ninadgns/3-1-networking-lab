@@ -1,6 +1,8 @@
 # Networking Lab – 3rd Year 1st Semester
 
-A collection of networking programming assignments and implementations covering various network protocols and communication patterns.
+A collection of networking programming assignments and implementations covering socket programming, HTTP file servers, TCP/UDP protocols with reliability mechanisms, and distance vector routing algorithms. 
+This repository contains practical implementations of fundamental networking concepts including reliable data transfer, flow control, and congestion management. 
+Includes multi-threaded servers, sliding window protocols, RTT estimation, and network simulation using Cisco Packet Tracer.
 
 ## Repository Structure
 
